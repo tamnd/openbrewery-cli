@@ -1,62 +1,181 @@
 // Package openbrewery is the library behind the openbrewery command line:
-// the HTTP client, request shaping, and the typed data models for openbrewery.
+// the HTTP client, request shaping, and typed data models for the Open Brewery DB.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// The Client sets a real User-Agent, paces requests, and retries transient
+// failures (429 and 5xx) with exponential backoff. Four operations are provided:
+// list breweries with filters, full-text search, random, and database statistics.
 package openbrewery
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
-	"strings"
+	"net/url"
+	"sync"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to openbrewery. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "openbrewery/dev (+https://github.com/tamnd/openbrewery-cli)"
-
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at api.openbrewerydb.org; change it once you
-// know the real endpoints you want to read.
+// Host is the site this client talks to.
 const Host = "api.openbrewerydb.org"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to openbrewery over HTTP.
-type Client struct {
-	HTTP      *http.Client
+// Config holds tunable knobs for the HTTP client.
+type Config struct {
+	BaseURL   string
 	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
-
-	last time.Time
+	Rate      time.Duration
+	Timeout   time.Duration
+	Retries   int
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
-func NewClient() *Client {
-	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		UserAgent: DefaultUserAgent,
+// DefaultConfig returns sensible defaults for production use.
+func DefaultConfig() Config {
+	return Config{
+		BaseURL:   BaseURL,
+		UserAgent: "openbrewery-cli/0.1.0 (github.com/tamnd/openbrewery-cli)",
 		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Timeout:   30 * time.Second,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// Client talks to the Open Brewery DB over HTTP.
+type Client struct {
+	cfg  Config
+	http *http.Client
+	mu   sync.Mutex
+	last time.Time
+}
+
+// NewClient returns a Client configured with cfg.
+func NewClient(cfg Config) *Client {
+	return &Client{
+		cfg:  cfg,
+		http: &http.Client{Timeout: cfg.Timeout},
+	}
+}
+
+// ListOptions controls filtering for the List method.
+type ListOptions struct {
+	City    string // by_city
+	State   string // by_state
+	Country string // by_country
+	Type    string // by_type
+	Limit   int    // max results; 0 = default 50
+}
+
+// List returns breweries with optional filters. Paginates automatically.
+func (c *Client) List(ctx context.Context, opts ListOptions) ([]Brewery, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 50
+	}
+	pageSize := 50
+	if pageSize > limit {
+		pageSize = limit
+	}
+
+	var out []Brewery
+	page := 1
+	for {
+		u := c.buildListURL(opts, page, pageSize)
+		b, err := c.get(ctx, u)
+		if err != nil {
+			return nil, err
+		}
+		var batch []Brewery
+		if err := json.Unmarshal(b, &batch); err != nil {
+			return nil, fmt.Errorf("decode breweries: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		out = append(out, batch...)
+		if len(out) >= limit {
+			break
+		}
+		page++
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+// Search returns breweries matching the query string.
+func (c *Client) Search(ctx context.Context, query string, limit int) ([]Brewery, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	u := c.cfg.BaseURL + "/v1/breweries/search?query=" + url.QueryEscape(query) + fmt.Sprintf("&per_page=%d", limit)
+	b, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var items []Brewery
+	if err := json.Unmarshal(b, &items); err != nil {
+		return nil, fmt.Errorf("decode search: %w", err)
+	}
+	return items, nil
+}
+
+// Random returns size random breweries. size defaults to 1 if <= 0.
+func (c *Client) Random(ctx context.Context, size int) ([]Brewery, error) {
+	if size <= 0 {
+		size = 1
+	}
+	u := fmt.Sprintf("%s/v1/breweries/random?size=%d", c.cfg.BaseURL, size)
+	b, err := c.get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var items []Brewery
+	if err := json.Unmarshal(b, &items); err != nil {
+		return nil, fmt.Errorf("decode random: %w", err)
+	}
+	return items, nil
+}
+
+// GetMeta returns database statistics from the /meta endpoint.
+func (c *Client) GetMeta(ctx context.Context) (*Meta, error) {
+	b, err := c.get(ctx, c.cfg.BaseURL+"/v1/breweries/meta")
+	if err != nil {
+		return nil, err
+	}
+	var m Meta
+	if err := json.Unmarshal(b, &m); err != nil {
+		return nil, fmt.Errorf("decode meta: %w", err)
+	}
+	return &m, nil
+}
+
+func (c *Client) buildListURL(opts ListOptions, page, pageSize int) string {
+	params := url.Values{}
+	params.Set("per_page", fmt.Sprintf("%d", pageSize))
+	params.Set("page", fmt.Sprintf("%d", page))
+	if opts.City != "" {
+		params.Set("by_city", opts.City)
+	}
+	if opts.State != "" {
+		params.Set("by_state", opts.State)
+	}
+	if opts.Country != "" {
+		params.Set("by_country", opts.Country)
+	}
+	if opts.Type != "" {
+		params.Set("by_type", opts.Type)
+	}
+	return c.cfg.BaseURL + "/v1/breweries?" + params.Encode()
+}
+
+// get fetches url and returns the response body. It paces and retries.
+func (c *Client) get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
-	for attempt := 0; attempt <= c.Retries; attempt++ {
+	for attempt := 0; attempt <= c.cfg.Retries; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
@@ -64,7 +183,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -73,18 +192,18 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) ([]byte, bool, error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
-	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("User-Agent", c.cfg.UserAgent)
 
-	resp, err := c.HTTP.Do(req)
+	resp, err := c.http.Do(req)
 	if err != nil {
 		return nil, true, err
 	}
@@ -106,10 +225,12 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 
 // pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
-	if c.Rate <= 0 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cfg.Rate <= 0 {
 		return
 	}
-	if wait := c.Rate - time.Since(c.last); wait > 0 {
+	if wait := c.cfg.Rate - time.Since(c.last); wait > 0 {
 		time.Sleep(wait)
 	}
 	c.last = time.Now()
@@ -121,80 +242,4 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on api.openbrewerydb.org. It is a stand-in for the typed records you
-// will model from the real openbrewery endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `openbrewery cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
 }
