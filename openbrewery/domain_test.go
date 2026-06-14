@@ -24,7 +24,7 @@ func TestDomainInfo(t *testing.T) {
 
 func TestClassify(t *testing.T) {
 	cases := []struct{ in, typ, id string }{
-		{"b54b16e1", "brewery", "b54b16e1"},
+		{"10-barrel-brewing-co-bend-1", "brewery", "10-barrel-brewing-co-bend-1"},
 		{"anvil-brewery", "brewery", "anvil-brewery"},
 	}
 	for _, tc := range cases {
@@ -37,8 +37,8 @@ func TestClassify(t *testing.T) {
 }
 
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("brewery", "b54b16e1")
-	want := "https://" + Host + "/v1/breweries/b54b16e1"
+	got, err := Domain{}.Locate("brewery", "10-barrel-brewing-co-bend-1")
+	want := "https://" + Host + "/v1/breweries/10-barrel-brewing-co-bend-1"
 	if err != nil || got != want {
 		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
 	}

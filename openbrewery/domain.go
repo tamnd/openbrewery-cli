@@ -28,34 +28,28 @@ openbrewery reads public brewery data from api.openbrewerydb.org over plain
 HTTPS, shapes it into clean records, and prints output that pipes into the rest
 of your tools. No API key, nothing to run alongside it.
 
-List breweries by city, state, country, or type. Search by name. Fetch
-random picks. Check database statistics with the meta command.`,
+List breweries by city, state, or type. Search by name. Fetch a single brewery
+by its slug ID.`,
 			Site: Host,
 			Repo: "https://github.com/tamnd/openbrewery-cli",
 		},
 	}
 }
 
-// Register installs the client factory and all four operations onto app.
+// Register installs the client factory and all operations onto app.
 func (Domain) Register(app *kit.App) {
 	app.SetClient(newClient)
 
-	kit.Handle(app, kit.OpMeta{Name: "list", Group: "read", List: true,
-		Summary: "List breweries with optional filters"}, listOp)
+	kit.Handle(app, kit.OpMeta{Name: "breweries", Group: "read", List: true,
+		Summary: "List breweries with optional filters"}, breweriesOp)
 
-	kit.Handle(app, kit.OpMeta{Name: "get", Group: "read", Single: true,
-		Summary: "Get a brewery by UUID",
-		Args:    []kit.Arg{{Name: "id", Help: "brewery UUID"}}}, getOp)
+	kit.Handle(app, kit.OpMeta{Name: "brewery", Group: "read", Single: true,
+		Summary: "Get a brewery by ID",
+		Args:    []kit.Arg{{Name: "id", Help: "brewery slug ID (e.g. 10-barrel-brewing-co-bend-1)"}}}, breweryOp)
 
 	kit.Handle(app, kit.OpMeta{Name: "search", Group: "read", List: true,
-		Summary: "Search breweries by name, city, or other fields",
+		Summary: "Search breweries by name or keyword",
 		Args:    []kit.Arg{{Name: "query", Help: "search query"}}}, searchOp)
-
-	kit.Handle(app, kit.OpMeta{Name: "random", Group: "read", List: true,
-		Summary: "Get random breweries"}, randomOp)
-
-	kit.Handle(app, kit.OpMeta{Name: "meta", Group: "read", Single: true,
-		Summary: "Get database statistics"}, metaOp)
 }
 
 // newClient builds the client from the host-resolved config.
@@ -78,17 +72,16 @@ func newClient(_ context.Context, cfg kit.Config) (any, error) {
 
 // --- input structs ---
 
-type listInput struct {
-	City    string  `kit:"flag" help:"filter by city"`
-	State   string  `kit:"flag" help:"filter by state"`
-	Country string  `kit:"flag" help:"filter by country"`
-	Type    string  `kit:"flag" help:"filter by brewery type (micro,brewpub,large,...)"`
-	Limit   int     `kit:"flag,inherit" help:"max results"`
-	Client  *Client `kit:"inject"`
+type breweriesInput struct {
+	City   string  `kit:"flag" help:"filter by city"`
+	State  string  `kit:"flag" help:"filter by state"`
+	Type   string  `kit:"flag" help:"filter by type (micro, nano, regional, brewpub, large, planning, bar, contract, proprietor, taproom, closed)"`
+	Limit  int     `kit:"flag,inherit" help:"max results"`
+	Client *Client `kit:"inject"`
 }
 
-type getInput struct {
-	ID     string  `kit:"arg" help:"brewery UUID"`
+type breweryInput struct {
+	ID     string  `kit:"arg" help:"brewery slug ID"`
 	Client *Client `kit:"inject"`
 }
 
@@ -98,24 +91,18 @@ type searchInput struct {
 	Client *Client `kit:"inject"`
 }
 
-type randomInput struct {
-	Size   int     `kit:"flag" help:"number of random breweries (default 1)"`
-	Client *Client `kit:"inject"`
-}
-
-type metaInput struct {
-	Client *Client `kit:"inject"`
-}
-
 // --- handlers ---
 
-func listOp(ctx context.Context, in listInput, emit func(Brewery) error) error {
+func breweriesOp(ctx context.Context, in breweriesInput, emit func(Brewery) error) error {
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
 	opts := ListOptions{
-		City:    in.City,
-		State:   in.State,
-		Country: in.Country,
-		Type:    in.Type,
-		Limit:   in.Limit,
+		City:  in.City,
+		State: in.State,
+		Type:  in.Type,
+		Limit: limit,
 	}
 	items, err := in.Client.List(ctx, opts)
 	if err != nil {
@@ -129,7 +116,7 @@ func listOp(ctx context.Context, in listInput, emit func(Brewery) error) error {
 	return nil
 }
 
-func getOp(ctx context.Context, in getInput, emit func(*Brewery) error) error {
+func breweryOp(ctx context.Context, in breweryInput, emit func(*Brewery) error) error {
 	item, err := in.Client.Get(ctx, in.ID)
 	if err != nil {
 		return err
@@ -138,7 +125,11 @@ func getOp(ctx context.Context, in getInput, emit func(*Brewery) error) error {
 }
 
 func searchOp(ctx context.Context, in searchInput, emit func(Brewery) error) error {
-	items, err := in.Client.Search(ctx, in.Query, in.Limit)
+	limit := in.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	items, err := in.Client.Search(ctx, in.Query, limit)
 	if err != nil {
 		return err
 	}
@@ -148,27 +139,6 @@ func searchOp(ctx context.Context, in searchInput, emit func(Brewery) error) err
 		}
 	}
 	return nil
-}
-
-func randomOp(ctx context.Context, in randomInput, emit func(Brewery) error) error {
-	items, err := in.Client.Random(ctx, in.Size)
-	if err != nil {
-		return err
-	}
-	for _, item := range items {
-		if err := emit(item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func metaOp(ctx context.Context, in metaInput, emit func(*Meta) error) error {
-	m, err := in.Client.GetMeta(ctx)
-	if err != nil {
-		return err
-	}
-	return emit(m)
 }
 
 // Classify turns a brewery ID or URL into (type, id).
