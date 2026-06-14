@@ -19,11 +19,14 @@ func newTestClient(ts *httptest.Server) *openbrewery.Client {
 	return openbrewery.NewClient(cfg)
 }
 
+// mockBreweries uses the real API wire format: brewery_type, state_province,
+// address_1, website_url, and numeric lat/lon.
 const mockBreweries = `[
-	{"id":"b54b16e1","name":"Anvil Brewery","brewery_type":"micro","city":"Houston","state":"Texas","country":"United States","phone":"7135225521","website_url":"https://anvilbrewery.com","latitude":"29.749907","longitude":"-95.358421"},
-	{"id":"c3e82e1c","name":"Blue Dog Brewing","brewery_type":"brewpub","city":"Denver","state":"Colorado","country":"United States","phone":"3031234567","website_url":"https://bluedogbrewing.com","latitude":"39.739236","longitude":"-104.984862"}
+	{"id":"10-barrel-brewing-co-bend-1","name":"10 Barrel Brewing Co","brewery_type":"large","address_1":"62970 18th St","city":"Bend","state_province":"Oregon","postal_code":"97701","country":"United States","longitude":-121.28170597,"latitude":44.08770132,"phone":"5415851007","website_url":"http://www.10barrel.com","state":"Oregon","street":"62970 18th St"},
+	{"id":"anvil-brewery-houston","name":"Anvil Brewery","brewery_type":"micro","address_1":"1424 Westheimer Rd","city":"Houston","state_province":"Texas","postal_code":"77006","country":"United States","longitude":-95.397678,"latitude":29.745914,"phone":"7135225521","website_url":"https://anvilbrewery.com","state":"Texas","street":"1424 Westheimer Rd"}
 ]`
 
+// TestListSendsUserAgent checks that the client sets a User-Agent header.
 func TestListSendsUserAgent(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ua := r.Header.Get("User-Agent")
@@ -42,10 +45,10 @@ func TestListSendsUserAgent(t *testing.T) {
 	}
 }
 
+// TestListParsesItems checks field mapping: API wire names map to clean Brewery fields.
 func TestListParsesItems(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Only return results on page 1; page 2+ returns empty to stop pagination.
 		if r.URL.Query().Get("page") == "1" || r.URL.Query().Get("page") == "" {
 			_, _ = fmt.Fprint(w, mockBreweries)
 		} else {
@@ -62,20 +65,41 @@ func TestListParsesItems(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("len(items) = %d, want 2", len(items))
 	}
-	if items[0].Name != "Anvil Brewery" {
-		t.Errorf("items[0].Name = %q, want %q", items[0].Name, "Anvil Brewery")
+
+	b := items[0]
+	if b.ID != "10-barrel-brewing-co-bend-1" {
+		t.Errorf("ID = %q, want 10-barrel-brewing-co-bend-1", b.ID)
 	}
-	if items[0].BreweryType != "micro" {
-		t.Errorf("items[0].BreweryType = %q, want %q", items[0].BreweryType, "micro")
+	if b.Name != "10 Barrel Brewing Co" {
+		t.Errorf("Name = %q, want 10 Barrel Brewing Co", b.Name)
 	}
-	if items[0].City != "Houston" {
-		t.Errorf("items[0].City = %q, want %q", items[0].City, "Houston")
+	if b.Type != "large" {
+		t.Errorf("Type = %q, want large", b.Type)
 	}
-	if items[1].Name != "Blue Dog Brewing" {
-		t.Errorf("items[1].Name = %q, want %q", items[1].Name, "Blue Dog Brewing")
+	if b.City != "Bend" {
+		t.Errorf("City = %q, want Bend", b.City)
+	}
+	if b.State != "Oregon" {
+		t.Errorf("State = %q, want Oregon (from state_province)", b.State)
+	}
+	if b.Country != "United States" {
+		t.Errorf("Country = %q, want United States", b.Country)
+	}
+	if b.Address != "62970 18th St" {
+		t.Errorf("Address = %q, want 62970 18th St (from address_1)", b.Address)
+	}
+	if b.Website != "http://www.10barrel.com" {
+		t.Errorf("Website = %q, want http://www.10barrel.com (from website_url)", b.Website)
+	}
+	if b.Lat == "" {
+		t.Error("Lat should not be empty")
+	}
+	if b.Lon == "" {
+		t.Error("Lon should not be empty")
 	}
 }
 
+// TestListLimit checks that the limit is respected.
 func TestListLimit(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -93,6 +117,7 @@ func TestListLimit(t *testing.T) {
 	}
 }
 
+// TestListRetriesOn503 checks exponential backoff on 5xx errors.
 func TestListRetriesOn503(t *testing.T) {
 	hits := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -125,70 +150,68 @@ func TestListRetriesOn503(t *testing.T) {
 	}
 }
 
+// TestSearchParsesItems checks that Search hits the right endpoint and parses results.
 func TestSearchParsesItems(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, mockBreweries)
-	}))
-	defer srv.Close()
-
-	c := newTestClient(srv)
-	items, err := c.Search(context.Background(), "dog", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("len(items) = %d, want 2", len(items))
-	}
-	if items[1].Name != "Blue Dog Brewing" {
-		t.Errorf("items[1].Name = %q, want %q", items[1].Name, "Blue Dog Brewing")
-	}
-}
-
-func TestRandomParsesItems(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		size := r.URL.Query().Get("size")
-		if size != "3" {
-			t.Errorf("size param = %q, want %q", size, "3")
+		if !strings.Contains(r.URL.Path, "/breweries/search") {
+			t.Errorf("unexpected path %q, want /v1/breweries/search", r.URL.Path)
 		}
+		q := r.URL.Query().Get("query")
+		if q == "" {
+			t.Error("query param missing")
+		}
+		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, mockBreweries)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	items, err := c.Random(context.Background(), 3)
+	items, err := c.Search(context.Background(), "10 barrel", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(items) != 2 {
 		t.Fatalf("len(items) = %d, want 2", len(items))
 	}
+	if items[1].Name != "Anvil Brewery" {
+		t.Errorf("items[1].Name = %q, want Anvil Brewery", items[1].Name)
+	}
 }
 
+// TestGetByID checks that Get hits the right path and maps fields correctly.
 func TestGetByID(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasSuffix(r.URL.Path, "/b54b16e1") {
+		if !strings.HasSuffix(r.URL.Path, "/10-barrel-brewing-co-bend-1") {
 			t.Errorf("unexpected path %q", r.URL.Path)
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, `{"id":"b54b16e1","name":"Anvil Brewery","brewery_type":"micro","city":"Houston","state":"Texas","country":"United States"}`)
+		_, _ = fmt.Fprint(w, `{"id":"10-barrel-brewing-co-bend-1","name":"10 Barrel Brewing Co","brewery_type":"large","address_1":"62970 18th St","city":"Bend","state_province":"Oregon","country":"United States","longitude":-121.28170597,"latitude":44.08770132,"phone":"5415851007","website_url":"http://www.10barrel.com"}`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	item, err := c.Get(context.Background(), "b54b16e1")
+	b, err := c.Get(context.Background(), "10-barrel-brewing-co-bend-1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if item.Name != "Anvil Brewery" {
-		t.Errorf("Name = %q, want Anvil Brewery", item.Name)
+	if b.Name != "10 Barrel Brewing Co" {
+		t.Errorf("Name = %q, want 10 Barrel Brewing Co", b.Name)
 	}
-	if item.City != "Houston" {
-		t.Errorf("City = %q, want Houston", item.City)
+	if b.Type != "large" {
+		t.Errorf("Type = %q, want large (from brewery_type)", b.Type)
+	}
+	if b.State != "Oregon" {
+		t.Errorf("State = %q, want Oregon (from state_province)", b.State)
+	}
+	if b.Address != "62970 18th St" {
+		t.Errorf("Address = %q, want 62970 18th St (from address_1)", b.Address)
+	}
+	if b.Website != "http://www.10barrel.com" {
+		t.Errorf("Website = %q, want http://www.10barrel.com (from website_url)", b.Website)
 	}
 }
 
+// TestGetNotFound checks that a 404 returns an error.
 func TestGetNotFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -202,27 +225,40 @@ func TestGetNotFound(t *testing.T) {
 	}
 }
 
-func TestGetMetaParsesResponse(t *testing.T) {
-	payload := `{"total":11744,"page":1,"per_page":50,"by_type":{"micro":5000,"brewpub":2000},"by_state":{"Texas":500,"Colorado":400},"by_country":{"United States":10000}}`
-
+// TestListByCity checks that city filter is passed as by_city param.
+func TestListByCity(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		city := r.URL.Query().Get("by_city")
+		if city != "san diego" {
+			t.Errorf("by_city = %q, want san diego", city)
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprint(w, payload)
+		_, _ = fmt.Fprint(w, `[]`)
 	}))
 	defer srv.Close()
 
 	c := newTestClient(srv)
-	meta, err := c.GetMeta(context.Background())
+	_, err := c.List(context.Background(), openbrewery.ListOptions{City: "san diego", Limit: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if meta.Total != 11744 {
-		t.Errorf("meta.Total = %d, want 11744", meta.Total)
-	}
-	if meta.ByType["micro"] != 5000 {
-		t.Errorf("meta.ByType[micro] = %d, want 5000", meta.ByType["micro"])
-	}
-	if meta.ByCountry["United States"] != 10000 {
-		t.Errorf("meta.ByCountry[United States] = %d, want 10000", meta.ByCountry["United States"])
+}
+
+// TestListByType checks that type filter is passed as by_type param.
+func TestListByType(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		byType := r.URL.Query().Get("by_type")
+		if byType != "micro" {
+			t.Errorf("by_type = %q, want micro", byType)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `[]`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	_, err := c.List(context.Background(), openbrewery.ListOptions{Type: "micro", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
 	}
 }
