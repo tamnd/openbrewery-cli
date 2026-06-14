@@ -262,3 +262,30 @@ func TestListByType(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestGetMeta checks that GetMeta hits the right endpoint and parses the response.
+func TestGetMeta(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/breweries/meta") {
+			t.Errorf("unexpected path %q, want /v1/breweries/meta", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"total":11744,"by_type":{"bar":43,"micro":5788,"nano":21},"by_state":{},"by_country":{}}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	m, err := c.GetMeta(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Total != 11744 {
+		t.Errorf("Total = %d, want 11744", m.Total)
+	}
+	if m.ByType["micro"] != 5788 {
+		t.Errorf("ByType[micro] = %d, want 5788", m.ByType["micro"])
+	}
+	if m.ByType["bar"] != 43 {
+		t.Errorf("ByType[bar] = %d, want 43", m.ByType["bar"])
+	}
+}
