@@ -50,6 +50,9 @@ func (Domain) Register(app *kit.App) {
 	kit.Handle(app, kit.OpMeta{Name: "search", Group: "read", List: true,
 		Summary: "Search breweries by name or keyword",
 		Args:    []kit.Arg{{Name: "query", Help: "search query"}}}, searchOp)
+
+	kit.Handle(app, kit.OpMeta{Name: "meta", Group: "read", Single: true,
+		Summary: "Get database statistics: total count and breakdown by type"}, metaOp)
 }
 
 // newClient builds the client from the host-resolved config.
@@ -91,6 +94,10 @@ type searchInput struct {
 	Client *Client `kit:"inject"`
 }
 
+type metaInput struct {
+	Client *Client `kit:"inject"`
+}
+
 // --- handlers ---
 
 func breweriesOp(ctx context.Context, in breweriesInput, emit func(Brewery) error) error {
@@ -122,6 +129,14 @@ func breweryOp(ctx context.Context, in breweryInput, emit func(*Brewery) error) 
 		return err
 	}
 	return emit(item)
+}
+
+func metaOp(ctx context.Context, in metaInput, emit func(*Meta) error) error {
+	m, err := in.Client.GetMeta(ctx)
+	if err != nil {
+		return err
+	}
+	return emit(m)
 }
 
 func searchOp(ctx context.Context, in searchInput, emit func(Brewery) error) error {
