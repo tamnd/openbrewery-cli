@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,6 +163,42 @@ func TestRandomParsesItems(t *testing.T) {
 	}
 	if len(items) != 2 {
 		t.Fatalf("len(items) = %d, want 2", len(items))
+	}
+}
+
+func TestGetByID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/b54b16e1") {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"id":"b54b16e1","name":"Anvil Brewery","brewery_type":"micro","city":"Houston","state":"Texas","country":"United States"}`)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	item, err := c.Get(context.Background(), "b54b16e1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if item.Name != "Anvil Brewery" {
+		t.Errorf("Name = %q, want Anvil Brewery", item.Name)
+	}
+	if item.City != "Houston" {
+		t.Errorf("City = %q, want Houston", item.City)
+	}
+}
+
+func TestGetNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestClient(srv)
+	_, err := c.Get(context.Background(), "nonexistent-id")
+	if err == nil {
+		t.Error("expected error for 404, got nil")
 	}
 }
 

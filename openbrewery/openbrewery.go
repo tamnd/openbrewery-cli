@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -138,6 +139,23 @@ func (c *Client) Random(ctx context.Context, size int) ([]Brewery, error) {
 		return nil, fmt.Errorf("decode random: %w", err)
 	}
 	return items, nil
+}
+
+// Get returns a single brewery by its UUID. Returns an error for unknown IDs.
+func (c *Client) Get(ctx context.Context, id string) (*Brewery, error) {
+	u := c.cfg.BaseURL + "/v1/breweries/" + url.PathEscape(id)
+	b, err := c.get(ctx, u)
+	if err != nil {
+		if strings.Contains(err.Error(), "http 404") {
+			return nil, fmt.Errorf("brewery %s: not found", id)
+		}
+		return nil, err
+	}
+	var item Brewery
+	if err := json.Unmarshal(b, &item); err != nil {
+		return nil, fmt.Errorf("decode brewery: %w", err)
+	}
+	return &item, nil
 }
 
 // GetMeta returns database statistics from the /meta endpoint.

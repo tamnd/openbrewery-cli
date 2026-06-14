@@ -43,6 +43,10 @@ func (Domain) Register(app *kit.App) {
 	kit.Handle(app, kit.OpMeta{Name: "list", Group: "read", List: true,
 		Summary: "List breweries with optional filters"}, listOp)
 
+	kit.Handle(app, kit.OpMeta{Name: "get", Group: "read", Single: true,
+		Summary: "Get a brewery by UUID",
+		Args:    []kit.Arg{{Name: "id", Help: "brewery UUID"}}}, getOp)
+
 	kit.Handle(app, kit.OpMeta{Name: "search", Group: "read", List: true,
 		Summary: "Search breweries by name, city, or other fields",
 		Args:    []kit.Arg{{Name: "query", Help: "search query"}}}, searchOp)
@@ -83,6 +87,11 @@ type listInput struct {
 	Client  *Client `kit:"inject"`
 }
 
+type getInput struct {
+	ID     string  `kit:"arg" help:"brewery UUID"`
+	Client *Client `kit:"inject"`
+}
+
 type searchInput struct {
 	Query  string  `kit:"arg" help:"search query"`
 	Limit  int     `kit:"flag,inherit" help:"max results"`
@@ -118,6 +127,14 @@ func listOp(ctx context.Context, in listInput, emit func(Brewery) error) error {
 		}
 	}
 	return nil
+}
+
+func getOp(ctx context.Context, in getInput, emit func(*Brewery) error) error {
+	item, err := in.Client.Get(ctx, in.ID)
+	if err != nil {
+		return err
+	}
+	return emit(item)
 }
 
 func searchOp(ctx context.Context, in searchInput, emit func(Brewery) error) error {
